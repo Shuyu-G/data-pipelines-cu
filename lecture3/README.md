@@ -281,9 +281,140 @@ Each example builds upon previous concepts, creating a comprehensive learning pa
 
 ---
 
+## 12-14: Binance Price Tracking Exercise
+
+### Overview
+
+This exercise demonstrates a real-world data pipeline that:
+1. **Fetches** Bitcoin price data from Binance API every minute
+2. **Aggregates** minute-level data into hourly averages
+3. **Aggregates** hourly data into daily averages
+4. **Saves** all data to CSV files for analysis
+
+### Files
+
+- **`12_binance_fetch_minute.py`**: Fetches price every minute from Binance API
+- **`13_binance_calculate_hourly.py`**: Calculates hourly averages (runs every hour)
+- **`14_binance_calculate_daily.py`**: Calculates daily averages (runs every 24 hours)
+
+### API Endpoint
+
+The DAGs fetch data from:
+```
+https://api.binance.com/api/v3/avgPrice?symbol=BTCUSDT
+```
+
+**Response Format:**
+```json
+{
+    "mins": 5,
+    "price": "68285.81006621",
+    "closeTime": 1771317380403
+}
+```
+
+### Data Flow
+
+```
+Minute Fetch (every 1 min)
+    ↓
+/data/binance/raw/{date}/daily_raw.csv
+    ↓
+Hourly Aggregation (every 1 hour)
+    ↓
+/data/binance/hourly/{date}/hourly_avg.csv
+    ↓
+Daily Aggregation (every 24 hours)
+    ↓
+/data/binance/daily/daily_avg.csv
+```
+
+### Key Features
+
+1. **Multi-Level Aggregation**: Demonstrates hierarchical data processing
+2. **Date Partitioning**: Data organized by date for efficient storage
+3. **Error Handling**: Retry logic for API failures
+4. **Real-Time Processing**: Continuous data collection and aggregation
+5. **CSV Output**: All data saved in CSV format for easy analysis
+
+### Running the Exercise
+
+1. **Place DAGs in Airflow DAGs folder**
+2. **Enable all three DAGs** in Airflow UI:
+   - `binance_fetch_minute` (runs every minute)
+   - `binance_calculate_hourly` (runs every hour)
+   - `binance_calculate_daily` (runs daily)
+
+3. **Let it run for at least 24 hours** to collect meaningful data
+
+4. **Check output files**:
+   - Raw minute data: `/data/binance/raw/{date}/daily_raw.csv`
+   - Hourly averages: `/data/binance/hourly/{date}/hourly_avg.csv`
+   - Daily averages: `/data/binance/daily/daily_avg.csv`
+
+### Output CSV Structure
+
+**Minute Data** (`daily_raw.csv`):
+```csv
+mins,price,closeTime,timestamp,fetch_time,price_float
+5,68285.81006621,1771317380403,2024-01-15T10:30:00,2024-01-15 10:30:00,68285.81
+```
+
+**Hourly Averages** (`hourly_avg.csv`):
+```csv
+date,hour,avg_price,min_price,max_price,first_price,last_price,data_points,calculated_at
+2024-01-15,10,68250.25,68100.00,68400.00,68200.00,68300.00,60,2024-01-15 10:59:59
+```
+
+**Daily Averages** (`daily_avg.csv`):
+```csv
+date,avg_price,min_price,max_price,opening_price,closing_price,price_change,price_change_pct,total_data_points,hours_with_data,calculated_at
+2024-01-15,68250.25,67500.00,69000.00,68000.00,68500.00,500.00,0.74,1440,24,2024-01-16 00:00:00
+```
+
+### Concepts Demonstrated
+
+- **Scheduled Data Collection**: Continuous API polling
+- **Data Aggregation**: Multi-level time-based aggregation
+- **Date Partitioning**: Organized data storage by date
+- **Error Handling**: Retry mechanisms for network failures
+- **Data Persistence**: CSV file storage for historical analysis
+- **Pipeline Orchestration**: Multiple DAGs working together
+
+### Why Airflow vs. Regular Scripts
+
+**With Airflow:**
+- ✅ Automatic scheduling (runs every minute/hour/day without manual intervention)
+- ✅ Built-in retry logic if API fails
+- ✅ Web UI monitoring of all runs
+- ✅ Historical execution tracking
+- ✅ Can run continuously for days/weeks
+- ✅ Automatic data partitioning by date
+
+**Without Airflow (Regular Script):**
+- ❌ Must manually run script every minute (or use cron, which is harder to monitor)
+- ❌ No built-in retry mechanism
+- ❌ No visibility into execution history
+- ❌ Hard to track which data has been collected
+- ❌ Manual date partitioning logic required
+
+### Dependencies
+
+Make sure to install required packages:
+```bash
+pip install requests pandas
+```
+
+Or use the `requirements.txt` file:
+```bash
+pip install -r requirements.txt
+```
+
+---
+
 ## Events API
 
-The DAGs in this lecture fetch events from a Flask API running at `http://events_api:5000/events`. 
+The DAGs in this lecture fetch events from a Flask API running at `http://localhost:5001/events`. 
 
 ### Running the Events API
 
@@ -358,7 +489,7 @@ Health check endpoint that returns the API status.
 
 ### Docker Usage
 
-If you're running Airflow in Docker and need the events API accessible at `http://events_api:5000`, you can:
+If you're running Airflow in Docker and need the events API accessible at `http://localhost:5001`, you can:
 
 1. Add the events API service to your `docker-compose.yml`:
    ```yaml
@@ -395,7 +526,7 @@ fetch_events = BashOperator(
     bash_command=(
         "mkdir -p /data/events && "
         "curl -o /data/events/{{ds}}.json "
-        "http://events_api:5000/events?"
+        "http://localhost:5001/events?"
         "start_date={{ds}}&"
         "end_date={{next_ds}}"
     ),
@@ -408,7 +539,7 @@ fetch_events = BashOperator(
 # You would run this manually:
 mkdir -p /data/events
 curl -o /data/events/2019-01-01.json \
-  "http://events_api:5000/events?start_date=2019-01-01&end_date=2019-01-02"
+  "http://localhost:5001/events?start_date=2019-01-01&end_date=2019-01-02"
 ```
 
 #### Key Differences: Why Airflow is Better
@@ -638,7 +769,7 @@ next_date = "2019-01-02"
 # Step 1: Fetch events
 subprocess.run([
     "curl", "-o", f"/data/events/{date}.json",
-    f"http://events_api:5000/events?start_date={date}&end_date={next_date}"
+    f"http://localhost:5001/events?start_date={date}&end_date={next_date}"
 ])
 
 # Step 2: Calculate stats

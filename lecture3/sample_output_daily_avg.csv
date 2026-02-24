@@ -1,0 +1,3 @@
+date,avg_price,min_price,max_price,opening_price,closing_price,price_change,price_change_pct,total_data_points,hours_with_data,calculated_at
+2024-01-15,68250.25,67500.00,69000.00,68000.00,68500.00,500.00,0.74,1440,24,2024-01-16 00:00:00
+
