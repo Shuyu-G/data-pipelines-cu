@@ -1,1 +1,3 @@
 data-pipelines-with-apache-airflow/
+.DS_Store
+__pycache__/
