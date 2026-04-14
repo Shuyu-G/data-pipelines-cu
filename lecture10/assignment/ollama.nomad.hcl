@@ -1,6 +1,6 @@
 # Lecture 10 — Ollama on Nomad (simplified from HashiCorp AI workloads tutorial)
 # - ollama-task: Docker ollama/ollama + Nomad service ollama-backend
-# - pull-model: poststart exec curls /api/pull (tinyllama by default; switch to granite3.3:2b if you have RAM)
+# - pull-model: poststart task curls /api/pull (qwen3.5:35b-a3b by default for this machine)
 
 job "ollama" {
   type = "service"
@@ -27,17 +27,23 @@ job "ollama" {
       config {
         image = "ollama/ollama:latest"
         ports = ["ollama"]
+        mount {
+          type     = "volume"
+          source   = "ollama-models"
+          target   = "/root/.ollama"
+          readonly = false
+        }
       }
 
-      # Lower CPU helps single-node dev agents; raise for production / larger models.
+      # Tuned for a 64 GiB laptop running qwen3.5:35b-a3b via Ollama.
       resources {
-        cpu    = 1500
-        memory = 4096
+        cpu    = 8000
+        memory = 40960
       }
     }
 
     task "pull-model" {
-      driver = "exec"
+      driver = "raw_exec"
 
       lifecycle {
         hook    = "poststart"
@@ -45,14 +51,14 @@ job "ollama" {
       }
 
       resources {
-        cpu    = 50
-        memory = 256
+        cpu    = 500
+        memory = 1024
       }
 
       template {
         data = <<EOH
 {{ range nomadService "ollama-backend" }}
-OLLAMA_BASE_URL=http://{{ .Address }}:{{ .Port }}
+OLLAMA_BASE_URL=http://[{{ .Address }}]:{{ .Port }}
 {{ end }}
 EOH
         destination = "secrets/env.env"
@@ -60,20 +66,22 @@ EOH
       }
 
       config {
-        command = "/bin/bash"
+        command = "/bin/sh"
         args = [
           "-c",
           <<-SCRIPT
             set -e
             echo "Waiting for Ollama at $OLLAMA_BASE_URL ..."
-            for i in {1..60}; do
+            i=0
+            while [ "$i" -lt 60 ]; do
               if curl -sf "$OLLAMA_BASE_URL/api/tags" >/dev/null 2>&1; then
                 break
               fi
               sleep 2
+              i=$((i + 1))
             done
-            echo "Pulling model (switch to granite3.3:2b in jobspec if you have enough RAM) ..."
-            curl -sS -X POST "$OLLAMA_BASE_URL/api/pull" -d '{"name":"tinyllama"}'
+            echo "Pulling model qwen3.5:35b-a3b ..."
+            curl -sS -X POST "$OLLAMA_BASE_URL/api/pull" -d '{"name":"qwen3.5:35b-a3b"}'
             echo "Done."
           SCRIPT
         ]
