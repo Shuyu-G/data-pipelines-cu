@@ -35,19 +35,22 @@ logger = logging.getLogger(__name__)
 
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 DEFAULT_OLLAMA_BASE_URL = "http://host.docker.internal:11434"
-DEFAULT_OLLAMA_MODEL = "qwen3.5:35b-a3b"
+DEFAULT_OLLAMA_MODEL = "qwen3.5:9b"
 DEFAULT_LATITUDE = "53.0736"
 DEFAULT_LONGITUDE = "8.8064"
 DEFAULT_OLLAMA_TIMEOUT_SECONDS = 600
+HOURLY_POINTS_FOR_LLM = 6
 
 REQUIRED_KEYS = [
     "latitude",
     "longitude",
-    "temperature_c",
-    "weather_code",
-    "conditions_short",
-    "daily_max_temp_c",
-    "daily_min_temp_c",
+    "current_time",
+    "current_temperature_2m",
+    "current_wind_speed_10m",
+    "hourly_first_time",
+    "hourly_first_temperature_2m",
+    "hourly_first_relative_humidity_2m",
+    "hourly_first_wind_speed_10m",
     "source",
 ]
 
@@ -109,28 +112,73 @@ def _coerce_int(value: Any, field_name: str) -> int:
         raise ValueError(f"Field '{field_name}' must be an integer, got {value!r}") from exc
 
 
+def _coerce_float_list(values: Any, field_name: str) -> list[float]:
+    if not isinstance(values, list) or not values:
+        raise ValueError(f"Field '{field_name}' must be a non-empty list")
+    return [_coerce_float(value, f"{field_name}[]") for value in values]
+
+
+def _coerce_string_list(values: Any, field_name: str) -> list[str]:
+    if not isinstance(values, list) or not values:
+        raise ValueError(f"Field '{field_name}' must be a non-empty list")
+    output: list[str] = []
+    for value in values:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"Field '{field_name}' must contain non-empty strings")
+        output.append(value)
+    return output
+
+
+def _compact_open_meteo_payload(raw_payload_text: str) -> str:
+    raw_payload = json.loads(raw_payload_text)
+    hourly = raw_payload.get("hourly", {})
+    compact_hourly = {}
+
+    for key in ("time", "temperature_2m", "relative_humidity_2m", "wind_speed_10m"):
+        values = hourly.get(key)
+        if isinstance(values, list):
+            compact_hourly[key] = values[:HOURLY_POINTS_FOR_LLM]
+
+    compact_payload = {
+        "latitude": raw_payload.get("latitude"),
+        "longitude": raw_payload.get("longitude"),
+        "current": raw_payload.get("current", {}),
+        "hourly": compact_hourly,
+    }
+    return json.dumps(compact_payload, ensure_ascii=False)
+
+
 def _build_mock_structured_payload(raw_payload_text: str) -> str:
     raw_payload = json.loads(raw_payload_text)
     current = raw_payload.get("current", {})
-    daily = raw_payload.get("daily", {})
+    hourly = raw_payload.get("hourly", {})
 
-    weather_code = current.get("weather_code")
     structured = {
         "latitude": _coerce_float(raw_payload.get("latitude"), "latitude"),
         "longitude": _coerce_float(raw_payload.get("longitude"), "longitude"),
-        "temperature_c": _coerce_float(current.get("temperature_2m"), "temperature_2m"),
-        "weather_code": _coerce_int(weather_code, "weather_code"),
-        "conditions_short": WMO_SHORT_CONDITIONS.get(int(weather_code), "unknown"),
-        "daily_max_temp_c": _coerce_float(
-            (daily.get("temperature_2m_max") or [None])[0],
-            "daily.temperature_2m_max[0]",
+        "current_time": current.get("time"),
+        "current_temperature_2m": _coerce_float(
+            current.get("temperature_2m"), "current.temperature_2m"
         ),
-        "daily_min_temp_c": _coerce_float(
-            (daily.get("temperature_2m_min") or [None])[0],
-            "daily.temperature_2m_min[0]",
+        "current_wind_speed_10m": _coerce_float(
+            current.get("wind_speed_10m"), "current.wind_speed_10m"
         ),
+        "hourly_first_time": _coerce_string_list(
+            (hourly.get("time") or [])[:1], "hourly.time"
+        )[0],
+        "hourly_first_temperature_2m": _coerce_float_list(
+            (hourly.get("temperature_2m") or [])[:1], "hourly.temperature_2m"
+        )[0],
+        "hourly_first_relative_humidity_2m": _coerce_float_list(
+            (hourly.get("relative_humidity_2m") or [])[:1], "hourly.relative_humidity_2m"
+        )[0],
+        "hourly_first_wind_speed_10m": _coerce_float_list(
+            (hourly.get("wind_speed_10m") or [])[:1], "hourly.wind_speed_10m"
+        )[0],
         "source": "open-meteo",
     }
+    if not isinstance(structured["current_time"], str) or not structured["current_time"].strip():
+        raise ValueError("Field 'current_time' must be a non-empty string")
     return json.dumps(structured, ensure_ascii=False)
 
 
@@ -143,9 +191,8 @@ def fetch_weather(**context: Any) -> str:
     params = {
         "latitude": latitude,
         "longitude": longitude,
-        "current": "temperature_2m,weather_code",
-        "daily": "temperature_2m_max,temperature_2m_min",
-        "timezone": "auto",
+        "current": "temperature_2m,wind_speed_10m",
+        "hourly": "temperature_2m,relative_humidity_2m,wind_speed_10m",
     }
 
     logger.info("Fetching Open-Meteo weather data with params=%s", params)
@@ -175,22 +222,26 @@ def ollama_to_structured(**context: Any) -> str:
     ollama_timeout_seconds = int(
         os.getenv("WEATHER_PIPELINES_OLLAMA_TIMEOUT_SECONDS", str(DEFAULT_OLLAMA_TIMEOUT_SECONDS))
     )
+    compact_payload_text = _compact_open_meteo_payload(raw_payload_text)
 
     prompt = f"""
 Return only JSON.
 Do not include Markdown.
 Do not include explanation text.
 Do not include any keys other than these exact keys:
-latitude, longitude, temperature_c, weather_code, conditions_short, daily_max_temp_c, daily_min_temp_c, source
+latitude, longitude, current_time, current_temperature_2m, current_wind_speed_10m, hourly_first_time, hourly_first_temperature_2m, hourly_first_relative_humidity_2m, hourly_first_wind_speed_10m, source
 
 Rules:
 - source must be exactly "open-meteo"
-- weather_code must be an integer
-- latitude, longitude, temperature_c, daily_max_temp_c, daily_min_temp_c must be numbers
-- conditions_short must be a short human-readable weather description
+- latitude, longitude, current_temperature_2m, current_wind_speed_10m must be numbers
+- hourly_first_time must be the first value from hourly.time
+- hourly_first_temperature_2m must be the first value from hourly.temperature_2m
+- hourly_first_relative_humidity_2m must be the first value from hourly.relative_humidity_2m
+- hourly_first_wind_speed_10m must be the first value from hourly.wind_speed_10m
+- use only the payload provided below; it has already been compacted to the first {HOURLY_POINTS_FOR_LLM} hourly entries
 
 Raw Open-Meteo payload:
-{raw_payload_text}
+{compact_payload_text}
 """.strip()
 
     request_body = {
@@ -199,13 +250,15 @@ Raw Open-Meteo payload:
         "stream": False,
         "format": "json",
         "think": False,
+        "options": {"temperature": 0},
     }
 
     logger.info(
-        "Calling Ollama at %s/api/chat with model=%s timeout=%ss",
+        "Calling Ollama at %s/api/chat with model=%s timeout=%ss using %d hourly points",
         ollama_base_url,
         ollama_model,
         ollama_timeout_seconds,
+        HOURLY_POINTS_FOR_LLM,
     )
     response = requests.post(
         f"{ollama_base_url}/api/chat",
@@ -240,17 +293,30 @@ def validate_and_emit(**context: Any) -> dict[str, Any]:
     if missing:
         raise ValueError(f"Missing required keys: {missing}")
 
-    for key in ("conditions_short", "source"):
+    for key in ("current_time", "source"):
         value = data.get(key)
         if value is None or (isinstance(value, str) and not value.strip()):
             raise ValueError(f"Field '{key}' must not be empty")
 
     data["latitude"] = _coerce_float(data["latitude"], "latitude")
     data["longitude"] = _coerce_float(data["longitude"], "longitude")
-    data["temperature_c"] = _coerce_float(data["temperature_c"], "temperature_c")
-    data["weather_code"] = _coerce_int(data["weather_code"], "weather_code")
-    data["daily_max_temp_c"] = _coerce_float(data["daily_max_temp_c"], "daily_max_temp_c")
-    data["daily_min_temp_c"] = _coerce_float(data["daily_min_temp_c"], "daily_min_temp_c")
+    data["current_temperature_2m"] = _coerce_float(
+        data["current_temperature_2m"], "current_temperature_2m"
+    )
+    data["current_wind_speed_10m"] = _coerce_float(
+        data["current_wind_speed_10m"], "current_wind_speed_10m"
+    )
+    if not isinstance(data["hourly_first_time"], str) or not data["hourly_first_time"].strip():
+        raise ValueError("Field 'hourly_first_time' must be a non-empty string")
+    data["hourly_first_temperature_2m"] = _coerce_float(
+        data["hourly_first_temperature_2m"], "hourly_first_temperature_2m"
+    )
+    data["hourly_first_relative_humidity_2m"] = _coerce_float(
+        data["hourly_first_relative_humidity_2m"], "hourly_first_relative_humidity_2m"
+    )
+    data["hourly_first_wind_speed_10m"] = _coerce_float(
+        data["hourly_first_wind_speed_10m"], "hourly_first_wind_speed_10m"
+    )
 
     if data["source"] != "open-meteo":
         raise ValueError(f"Field 'source' must be 'open-meteo', got {data['source']!r}")
