@@ -1,0 +1,2 @@
+# fetch_weather.py uses only the Python standard library.
+# Spark is installed inside the Vagrant VM by Vagrantfile provisioning.

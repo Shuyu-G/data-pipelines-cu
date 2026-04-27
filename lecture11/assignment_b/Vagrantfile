@@ -1,0 +1,49 @@
+require "rbconfig"
+
+host_cpu = RbConfig::CONFIG["host_cpu"]
+arm_host = host_cpu.include?("arm") || host_cpu.include?("aarch64")
+ubuntu_box = arm_host ? "net9/ubuntu-24.04-arm64" : "ubuntu/jammy64"
+java_home = arm_host ? "/usr/lib/jvm/java-17-openjdk-arm64" : "/usr/lib/jvm/java-17-openjdk-amd64"
+
+Vagrant.configure("2") do |config|
+  config.vm.box = ubuntu_box
+  config.vm.hostname = "lecture11b-spark"
+
+  config.vm.provider "virtualbox" do |vb|
+    vb.name = "lecture11b-spark"
+    vb.memory = 4096
+    vb.cpus = 2
+
+    if arm_host
+      vb.customize ["modifyvm", :id, "--ostype", "Ubuntu24_LTS_arm64"]
+      vb.customize ["modifyvm", :id, "--chipset", "armv8virtual"]
+      vb.customize ["modifyvm", :id, "--firmware", "efi"]
+      vb.customize ["modifyvm", :id, "--ioapic", "on"]
+      vb.customize ["modifyvm", :id, "--paravirt-provider", "default"]
+      vb.customize ["modifyvm", :id, "--graphicscontroller", "vmsvga"]
+      vb.customize ["modifyvm", :id, "--nictype1", "82540EM"]
+      vb.customize ["modifyvm", :id, "--mouse", "usbtablet"]
+      vb.customize ["modifyvm", :id, "--keyboard", "usb"]
+    end
+  end
+
+  config.vm.provision "shell", inline: <<-SHELL
+    set -eu
+
+    sudo apt-get update
+    sudo apt-get install -y ca-certificates openjdk-17-jdk wget curl python3-pip
+
+    if [ ! -d /opt/spark ]; then
+      cd /tmp
+      curl -L --fail --retry 3 -o spark-3.5.1-bin-hadoop3.tgz \
+        https://mirrors.huaweicloud.com/apache/spark/spark-3.5.1/spark-3.5.1-bin-hadoop3.tgz
+      tar -xzf spark-3.5.1-bin-hadoop3.tgz
+      sudo mv spark-3.5.1-bin-hadoop3 /opt/spark
+    fi
+
+    if ! grep -q "/opt/spark/bin" /home/vagrant/.bashrc; then
+      echo 'export PATH=/opt/spark/bin:$PATH' >> /home/vagrant/.bashrc
+      echo 'export JAVA_HOME=#{java_home}' >> /home/vagrant/.bashrc
+    fi
+  SHELL
+end
